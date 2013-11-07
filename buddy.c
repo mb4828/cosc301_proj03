@@ -16,7 +16,7 @@ void *malloc(size_t);
 void free(void *);
 void dump_memory_map(void);
 
-const int HEAPSIZE = (1*1024*1024); // 1 MB
+const int HEAPSIZE = 64;//(1*1024*1024); // 1 MB
 const int MINIMUM_ALLOC = sizeof(int) * 2;
 
 // global file-scope variables for keeping track
@@ -38,10 +38,10 @@ static void get_header(void *block, int *size, int *offset) {
 	*offset = iblock[1];
 }
 
-static int is_buddy(void *heap_begin, void *block1, void *block2) {
-	int heap_add = (uint64_t)(&heap_begin);
-	int b1 = (uint64_t)(&block1)-heap_add;
-	int b2 = (uint64_t)(&block2)-heap_add;
+static int is_buddy(void *block1, void *block2) {
+	int heap_add = (uint64_t)(heap_begin);
+	int b1 = (uint64_t)(block1)-heap_add;
+	int b2 = (uint64_t)(block2)-heap_add;
 	b1 = b1^b2;
 
 	int bit_diff = 0;
@@ -57,12 +57,25 @@ static int is_buddy(void *heap_begin, void *block1, void *block2) {
 	return 0;	
 }
 
+static int get_distance(void *block1, void *block2) {
+	uint8_t *ptr1 = (uint8_t*)block1;
+	uint8_t *ptr2 = (uint8_t*)block2;
+	int distance = 0;
+
+	while (ptr1 != ptr2) {
+		int size, offset;
+		get_header(ptr1, &size, &offset);
+		
+		distance += size;
+		ptr1 += size;
+	}
+	
+	return distance;
+}
+
 static void malloc_helper(uint8_t *ptr, int request_size) {
-	int *s=NULL;
-	int *o=NULL;
-	get_header(ptr, s, o);
-	int size = *s;
-	int offset = *o;
+	int size, offset;
+	get_header(ptr, &size, &offset);
 
 	if ((size/2) < request_size) {
 		// can't divide further; mark as allocated and return
@@ -71,8 +84,8 @@ static void malloc_helper(uint8_t *ptr, int request_size) {
 	}
 	
 	size /= 2;
-	uint8_t *ptr2 = ptr + size;
 	mod_header(ptr, size, size);
+	uint8_t *ptr2 = ptr + size;
 	if (offset == 0) {
 		mod_header(ptr2, size, 0);
 	} else {
@@ -82,6 +95,42 @@ static void malloc_helper(uint8_t *ptr, int request_size) {
 	malloc_helper(ptr, request_size);
 
 	return;
+}
+
+static void free_helper(uint8_t *ptr) {
+	int size, offset;
+	get_header(ptr, &size, &offset);
+
+	// find buddy
+	uint8_t *bptr = NULL;
+	if (size == HEAPSIZE) {
+		// there is no spoon... I mean... buddy
+		return;
+	} else if (is_buddy(ptr, ptr-size)) {
+		// buddy is to the left
+		bptr = ptr-size;
+	} else {
+		// buddy is to the right
+		bptr = ptr+size;
+	}
+
+	// merge buddies if possible
+	int bsize, boffset;
+	get_header(bptr, &bsize, &boffset);
+
+	if (bsize==size && is_buddy(ptr, ptr-size) && boffset!=0) {
+		// buddy is to the left and is free
+		mod_header(bptr, size*2, boffset+offset);
+		free_helper(bptr);
+	} else if (bsize==size && offset==size) {
+		// buddy is to the right and is free
+		if (boffset==0) {
+			mod_header(ptr, size*2, 0);
+		} else {
+			mod_header(ptr, size*2, offset+boffset);
+		}
+		free_helper(ptr);
+	}
 }
 
 void *malloc(size_t request_size) {
@@ -107,22 +156,21 @@ void *malloc(size_t request_size) {
 	// find a block of memory using first fit
 	uint8_t *ptr = freelist;
 	int prevoffset = 0;
-	int *size=NULL;
-	int *offset=NULL;
+	int size, offset;
 
 	while(1) {
-		get_header(ptr, size, offset);
+		get_header(ptr, &size, &offset);
 
-		if (*size < request_size) {
+		if (size < request_size) {
 			// block is too small
-			if (*offset == 0) {
+			if (offset == 0) {
 				// no more blocks; return a null pointer
 				ptr = NULL;
 				return ptr;
 			} else {
 				// go to next free block
-				ptr += *offset;
-				prevoffset = *offset;
+				ptr += offset;
+				prevoffset = offset;
 			}
 		} else {
 			// we've got our block
@@ -134,14 +182,24 @@ void *malloc(size_t request_size) {
 	malloc_helper(ptr, request_size);
 
 	// update freelist
-	get_header(ptr, size, offset);
-	if (&freelist == (void*)&ptr) {
-		uint8_t *freeptr = (uint8_t*)freelist;
-		freeptr += *offset;
-		freelist = (void*)freeptr;
+	get_header(ptr, &size, &offset);
+	if ((uint64_t)freelist == (uint64_t)ptr) {
+		if ((uint64_t)ptr-(uint64_t)heap_begin+size < (uint64_t)HEAPSIZE-1) {
+			// not last block in heap and not end of freelist
+			uint8_t *freeptr = (uint8_t*)freelist;
+			freeptr += size;
+			freelist = (void*)freeptr;
+		} else {
+			freelist = NULL;
+		}
 	} else {
 		uint8_t *ptr2 = ptr - prevoffset;
-		mod_header(ptr2, -1, prevoffset+*size);
+		if ((uint64_t)ptr-(uint64_t)heap_begin+size < (uint64_t)HEAPSIZE-1) {
+			// not last block in heap
+			mod_header(ptr2, -1, prevoffset+size);
+		} else {
+			mod_header(ptr2, -1, 0);
+		}
 	}
 
 	// return user space of block
@@ -150,40 +208,76 @@ void *malloc(size_t request_size) {
 	
 }
 
-void free(void *memory_block) {
+void free(void *block) {
+	int size, offset;
+	uint8_t *ptr = (uint8_t*)block;
 
+	if (block == NULL) {
+		return;
+	}
+
+	ptr -= 8;
+	get_header(ptr, &size, &offset);
+	
+	// free the current block by updating freelist
+	if (freelist == NULL) {
+		// ptr is the only free block
+		mod_header(ptr, size, 0);
+		freelist = (void*)ptr;
+	}	
+	else if ((uint64_t)freelist > (uint64_t)ptr) {
+		// ptr is the new head of freelist
+		mod_header(ptr, size, get_distance(ptr,freelist));
+		freelist = (void*)ptr;
+	} 
+	else {
+		// block is in middle of freelist
+		uint8_t *ptr2 = (uint8_t*)freelist;
+		int size2, offset2;
+		get_header(ptr2, &size2, &offset2);
+		while (*(ptr2+offset2) < *ptr) {
+			ptr2 += offset2;
+		}
+		
+		int distance = get_distance(ptr2, ptr);
+		mod_header(ptr2, size, distance);
+		mod_header(ptr2, size, offset2-distance);
+	}
+	
+	// recursively merge buddies if possible
+	free_helper(ptr);
 }
 
 void dump_memory_map(void) {
 	uint8_t *ptr = (uint8_t*)heap_begin;
-	int *s = NULL; 
-	int *o = NULL;
-	int size = 0; 
-	int offset = 0;
+	int size, offset;
+	int prevfree = -1;
 	
-	while (((uint64_t)&ptr-(uint64_t)&heap_begin) < (uint64_t)HEAPSIZE-1) {
-		get_header((void*)ptr, s, o);
-		size = *s;
-		offset = *o;
+	while ( ((uint64_t)ptr-(uint64_t)heap_begin) < ((uint64_t)HEAPSIZE-1) ) {
+		get_header(ptr, &size, &offset);
 
 		if (offset != 0) {
 			// found a free block
 			printf("Block size: %i, offset %i, free\n", size, offset);
+			prevfree = offset;
 		} 
 		else {
-			/*
-			if ( ((int)&(ptr+size))<(HEAPSIZE-1) || (&freelist!=&(void*)ptr) {
-				// block is allocated
+			// block could either be allocated or free
+			int size2, offset2;
+			if ((uint64_t)ptr-(uint64_t)prevfree >= (uint64_t)heap_begin) {
+				get_header(ptr-prevfree, &size2, &offset2);
+				if (offset2 == prevfree || (uint64_t)freelist == (uint64_t)ptr) {
+					// block is free
+					printf("Block size: %i, offset %i, free\n", size, offset);
+				} 
+			} 
+			else {
 				printf("Block size: %i, offset %i, allocated\n", size, offset);
-			} else {
-				// block is last block in heap and is free
-				printf("Block size: %i, offset %i, free\n", size, offset);
 			}
-			*/
-			printf("Block size: %i, offset %i, free/allocated\n", size, offset);
 		} 
 
 		ptr+=size;
 	}	
+	printf("\n");
 }
 
