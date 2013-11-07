@@ -16,7 +16,7 @@ void *malloc(size_t);
 void free(void *);
 void dump_memory_map(void);
 
-const int HEAPSIZE = 64;//(1*1024*1024); // 1 MB
+const int HEAPSIZE = (1*1024*1024); // 1 MB
 const int MINIMUM_ALLOC = sizeof(int) * 2;
 
 // global file-scope variables for keeping track
@@ -231,17 +231,27 @@ void free(void *block) {
 		freelist = (void*)ptr;
 	} 
 	else {
-		// block is in middle of freelist
+		// block is in middle or end of freelist
 		uint8_t *ptr2 = (uint8_t*)freelist;
 		int size2, offset2;
 		get_header(ptr2, &size2, &offset2);
-		while (*(ptr2+offset2) < *ptr) {
-			ptr2 += offset2;
+		while ((ptr2+offset2) < ptr) {
+			if (offset2 == 0) {
+				break;
+			} else {
+				ptr2+=offset2;
+				get_header(ptr2, &size2, &offset2);
+			}
 		}
 		
 		int distance = get_distance(ptr2, ptr);
-		mod_header(ptr2, size, distance);
-		mod_header(ptr2, size, offset2-distance);
+		mod_header(ptr2, size2, distance);
+		if ((uint64_t)ptr-(uint64_t)heap_begin+size >= (uint64_t)HEAPSIZE-1) {
+			// block is last block in heap and freelist
+			mod_header(ptr, size, 0);
+		} else {
+			mod_header(ptr, size, offset2-distance);
+		}
 	}
 	
 	// recursively merge buddies if possible
@@ -269,7 +279,9 @@ void dump_memory_map(void) {
 				if (offset2 == prevfree || (uint64_t)freelist == (uint64_t)ptr) {
 					// block is free
 					printf("Block size: %i, offset %i, free\n", size, offset);
-				} 
+				} else {
+					printf("Block size: %i, offset %i, allocated\n", size, offset);
+				}
 			} 
 			else {
 				printf("Block size: %i, offset %i, allocated\n", size, offset);
