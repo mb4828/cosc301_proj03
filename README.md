@@ -1,6 +1,6 @@
-cosc301_proj03
+CS 301: Project 3
 ==============
-Matthew Brauner<br />
-Professor Sommers<br />
-Colgate University - COSC 301<br />
-Due: November 16, 2013
+Operating Systems<br />
+
+Objective: Implement malloc and free functions using the buddy system.<br />
+Outcome: The general structure is there, although there are still some bugs in the code
